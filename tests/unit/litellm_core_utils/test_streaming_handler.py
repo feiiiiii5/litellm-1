@@ -1544,6 +1544,62 @@ def test_calculate_total_usage_preserves_anthropic_cache_creation_ttl_breakdown(
     assert ttl_breakdown.ephemeral_1h_input_tokens == 80
 
 
+def test_calculate_total_usage_keeps_reported_counts_over_a_trailing_zero():
+    """A count that some chunk already reported must not be replaced by a
+    later chunk reporting 0: providers such as Ollama send 0/0 on every chunk
+    before the one carrying the totals, and a finish-reason chunk is often
+    reported as 0/0 too. Taking the trailing 0 bills the request as free."""
+    from litellm.litellm_core_utils.streaming_handler import calculate_total_usage
+
+    first_chunk = ModelResponseStream(
+        id="chatcmpl-1",
+        created=1745513206,
+        model="ollama/llama3",
+        choices=[StreamingChoices(finish_reason=None, index=0, delta=Delta(content="Hi"))],
+        usage=Usage(prompt_tokens=1000, completion_tokens=50, total_tokens=1050),
+    )
+    trailing_zero_chunk = ModelResponseStream(
+        id="chatcmpl-1",
+        created=1745513207,
+        model="ollama/llama3",
+        choices=[StreamingChoices(finish_reason="stop", index=0, delta=Delta(content=""))],
+        usage=Usage(prompt_tokens=0, completion_tokens=0, total_tokens=0),
+    )
+
+    usage = calculate_total_usage([first_chunk, trailing_zero_chunk])
+
+    assert usage.prompt_tokens == 1000
+    assert usage.completion_tokens == 50
+    assert usage.total_tokens == 1050
+
+
+def test_calculate_total_usage_keeps_a_count_whose_later_chunk_reports_only_the_other():
+    """A partial usage payload reports only the counts it knows; the counts it
+    leaves at 0 have to survive, or the prompt side of the request is lost
+    silently."""
+    from litellm.litellm_core_utils.streaming_handler import calculate_total_usage
+
+    prompt_reported_chunk = ModelResponseStream(
+        id="chatcmpl-2",
+        created=1745513206,
+        model="claude-sonnet-5",
+        choices=[StreamingChoices(finish_reason=None, index=0, delta=Delta(content="Hi"))],
+        usage=Usage(prompt_tokens=1000, completion_tokens=1, total_tokens=1001),
+    )
+    completion_reported_chunk = ModelResponseStream(
+        id="chatcmpl-2",
+        created=1745513207,
+        model="claude-sonnet-5",
+        choices=[StreamingChoices(finish_reason="stop", index=0, delta=Delta(content=""))],
+        usage=Usage(prompt_tokens=0, completion_tokens=50, total_tokens=50),
+    )
+
+    usage = calculate_total_usage([prompt_reported_chunk, completion_reported_chunk])
+
+    assert usage.prompt_tokens == 1000
+    assert usage.completion_tokens == 50
+    assert usage.total_tokens == 1050
+
 @pytest.mark.asyncio
 async def test_openrouter_streaming_cost_after_finish_reason(logging_obj: Logging):
     from litellm.utils import ModelResponseListIterator

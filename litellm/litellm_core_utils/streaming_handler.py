@@ -2399,14 +2399,22 @@ def _coerce_token_details(
 
 
 def calculate_total_usage(chunks: list[ModelResponse]) -> Usage:
-    """Assume most recent usage chunk has total usage uptil then."""
+    """Take each count from the most recent usage chunk that reported it.
+
+    A count is never replaced by a later chunk reporting 0 for it: providers
+    such as Ollama send 0/0 on every chunk before the one carrying the totals,
+    and a partial usage payload reports only the counts it knows. This is the
+    rule ChunkProcessor._calculate_usage_per_chunk applies for the same reason.
+    """
     from litellm.litellm_core_utils.streaming_chunk_builder_utils import (
         attach_cache_creation_token_details,
         capture_cache_creation_token_details,
     )
 
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
+    # None means no usage chunk reported the count yet, which is the only case
+    # where a reported 0 is the count to use.
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
     latest_usage_chunk: Usage | Mapping[str, int] | None = None
     prompt_tokens_details: PromptTokensDetailsWrapper | None = None
     completion_tokens_details: CompletionTokensDetailsWrapper | None = None
@@ -2417,9 +2425,13 @@ def calculate_total_usage(chunks: list[ModelResponse]) -> Usage:
             usage = chunk["usage"]
             latest_usage_chunk = usage
             if "prompt_tokens" in usage:
-                prompt_tokens = usage.get("prompt_tokens", 0) or 0
+                incoming_prompt_tokens = usage.get("prompt_tokens", 0) or 0
+                if incoming_prompt_tokens > 0 or prompt_tokens is None:
+                    prompt_tokens = incoming_prompt_tokens
             if "completion_tokens" in usage:
-                completion_tokens = usage.get("completion_tokens", 0) or 0
+                incoming_completion_tokens = usage.get("completion_tokens", 0) or 0
+                if incoming_completion_tokens > 0 or completion_tokens is None:
+                    completion_tokens = incoming_completion_tokens
             incoming_prompt_tokens_details = _coerce_token_details(
                 usage, "prompt_tokens_details", PromptTokensDetailsWrapper
             )
@@ -2433,9 +2445,9 @@ def calculate_total_usage(chunks: list[ModelResponse]) -> Usage:
             )
 
     returned_usage_chunk: Final = Usage(
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
-        total_tokens=prompt_tokens + completion_tokens,
+        prompt_tokens=prompt_tokens or 0,
+        completion_tokens=completion_tokens or 0,
+        total_tokens=(prompt_tokens or 0) + (completion_tokens or 0),
         prompt_tokens_details=attach_cache_creation_token_details(prompt_tokens_details, cache_creation_token_details),
         completion_tokens_details=completion_tokens_details,
     )
